@@ -64,8 +64,9 @@ questions about what you heard on the phone, then leaves the call.
 ## 4. Report back
 
 The script prints a path like `data/poc/20261117-190200/report.md`. Paste that file into a comment
-on issue #2. It contains no email address and no meeting code. The screenshots in the same folder
-stay local, because they may show other participants.
+on issue #2. Meeting codes and email addresses are scrubbed from it. Keep the screenshots and
+`errors.log` in the same folder local: they may show other participants or contain the meeting
+link.
 
 Then **reboot** the laptop and run `uv run python scripts/poc.py --signin-only` again. Add the
 result to the comment.

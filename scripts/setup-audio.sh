@@ -68,9 +68,21 @@ up() {
 }
 
 down() {
+	# Match whole argument tokens on our two module types only, so e.g. a sink named
+	# meetbot_sink_backup is left alone. Lines are: ID, module name, args.
 	# Unload the remap source before the sink it reads from (higher module IDs first).
 	pactl list short modules |
-		awk -v a="sink_name=$SINK" -v b="source_name=$SOURCE" 'index($0, a) || index($0, b) {print $1}' |
+		awk -v s="sink_name=$SINK" -v m="source_name=$SOURCE" '
+			{
+				for (i = 3; i <= NF; i++) {
+					t = $i
+					gsub(/["\047]/, "", t)
+					if (($2 == "module-null-sink" && t == s) || ($2 == "module-remap-source" && t == m)) {
+						print $1
+						break
+					}
+				}
+			}' |
 		sort -rn |
 		while read -r id; do pactl unload-module "$id"; done
 	echo "Removed $SOURCE and $SINK."

@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +42,9 @@ from meet_standin.meet.chrome import (
 SCRIPTS = Path(__file__).resolve().parent
 MEET_ORIGIN = "https://meet.google.com"
 MEET_URL = re.compile(r"^https://meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}/?(\?.*)?$")
+# The report is pasted into a public issue: scrub meeting codes and email addresses from it.
+MEET_CODE = re.compile(r"\b[a-z]{3}-[a-z]{4}-[a-z]{3}\b")
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 MOD = "Meta" if sys.platform == "darwin" else "Control"
 LEAD_IN_SECONDS = 1.0
 
@@ -135,7 +139,18 @@ class Report:
         out += [f"- {n}: `{v}`" for n, v in self.facts]
         if self.notes:
             out += ["", "### Notes", ""] + [f"- {n}" for n in self.notes]
-        return "\n".join(out) + "\n"
+        return redact("\n".join(out) + "\n")
+
+
+def redact(text: str) -> str:
+    return EMAIL.sub("<email>", MEET_CODE.sub("<meeting-code>", text))
+
+
+def log_error(out: Path, step: str, exc: BaseException) -> None:
+    """Keep full error details local: Playwright errors can include URLs (the meeting code)."""
+    with (out / "errors.log").open("a", encoding="utf-8") as f:
+        f.write(f"--- {step}\n{''.join(traceback.format_exception(exc))}\n")
+    print(f"  {step} failed: {exc}")
 
 
 # --------------------------------------------------------------------------- helpers
@@ -362,12 +377,23 @@ async def meeting(page: Page, args: argparse.Namespace, report: Report, shots: P
         return
 
     if ready:
-        await set_toggle(page, "camera", False, report, "pre-join")
-        await set_toggle(page, "mic", False, report, "pre-join")
+        off = await devices_off(page, args, report)
+        if not off:
+            await shot("1a-devices-not-off")
+            await ask(
+                ">>> Couldn't confirm the camera is off and the mic is muted. "
+                "Fix that in the Chrome window, then press Enter... "
+            )
+            off = await devices_off(page, args, report)
+        report.check("Camera off and mic muted before joining", off)
+        if not off:
+            report.note("Didn't join, because the camera and mic state couldn't be confirmed")
+            return
     try:
         how = await join(page, report, args.admission_timeout) if ready else None
     except Exception as e:
-        report.note(f"Automatic join raised: {e}")
+        log_error(shots, "automatic join", e)
+        report.note(f"Automatic join failed ({type(e).__name__}); details in local errors.log")
         how = None
     if how is None:
         await shot("1b-join-failed")
@@ -385,8 +411,14 @@ async def meeting(page: Page, args: argparse.Namespace, report: Report, shots: P
     report.check("Mic muted after joining", mic is False, "" if mic is not None else "unknown")
     if mic:
         await set_toggle(page, "mic", False, report, "in call")
+    if await toggle_state(page, "camera"):
+        await set_toggle(page, "camera", False, report, "in call")
     camera = await toggle_state(page, "camera")
     report.check("Camera off after joining", camera is False, "" if camera is not None else "?")
+    if camera:
+        report.note("Left the call: the camera was on and couldn't be turned off")
+        await leave_call(page)
+        return
     state = await page.evaluate(
         "navigator.permissions.query({name: 'microphone'}).then(p => p.state)"
     )
@@ -424,15 +456,32 @@ async def meeting(page: Page, args: argparse.Namespace, report: Report, shots: P
         report.check(name, await ask_yes_no(question), "answered by you")
 
     await ask("\n>>> Press Enter to leave the call... ")
-    leave = await find_visible(page, LEAVE_CALL)
-    if leave:
-        await leave.click(timeout=5000)
-        await asyncio.sleep(3)
-    left = await find_visible(page, LEAVE_CALL) is None
+    left = await leave_call(page)
     if left:
         report.method("Leave", "button 'Leave call'")
     report.check("Left the call", left)
     await shot("4-left")
+
+
+async def devices_off(page: Page, args: argparse.Namespace, report: Report) -> bool:
+    """Camera off and mic muted, both verified from the button labels.
+
+    Without the camera permission Meet can't send video, so only then does an unreadable
+    camera button count as off.
+    """
+    camera_off = await set_toggle(page, "camera", False, report, "pre-join")
+    if not camera_off and not args.grant_camera:
+        camera_off = await toggle_state(page, "camera") is None
+    mic_off = await set_toggle(page, "mic", False, report, "pre-join")
+    return camera_off and mic_off
+
+
+async def leave_call(page: Page) -> bool:
+    leave = await find_visible(page, LEAVE_CALL)
+    if leave:
+        await leave.click(timeout=5000)
+        await asyncio.sleep(3)
+    return await find_visible(page, LEAVE_CALL) is None
 
 
 def permissions(args: argparse.Namespace) -> list[str]:
@@ -542,15 +591,19 @@ def main() -> int:
 
     out = paths.data_dir / "poc" / f"{report.started:%Y%m%d-%H%M%S}"
     out.mkdir(parents=True, exist_ok=True)
+    interrupted = False
     try:
         asyncio.run(run(args, paths, report, out))
     except KeyboardInterrupt:
+        interrupted = True
         report.note("Run aborted with Ctrl+C")
     finally:
         (out / "report.md").write_text(report.markdown(), encoding="utf-8")
         print(f"\nReport: {out / 'report.md'}")
-        print(f"Screenshots: {out}/*.png (local only; they may show participants)")
+        print(f"Screenshots and errors.log: {out} (local only; may show participants)")
         print("Paste the report into a comment on issue #2.")
+    if interrupted:
+        return 130  # conventional exit status for SIGINT
     failed = any(result == "FAIL" for _, result, _ in report.checks)
     return 1 if failed else 0
 
