@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Runtime data: Meet link, recordings, and the Chrome profile (a live Google session)
+data/
+state.json
+recordings/
+profile/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
